@@ -2,6 +2,12 @@
 
 import { revalidatePath } from "next/cache";
 
+import {
+  normalizeBatchDraft,
+  normalizePriceInput,
+  prepareBatchRowsForPersistence,
+  type BatchMenuItemDraft,
+} from "@/lib/menu/batch-import";
 import { createSupabaseServerClient } from "@/lib/supabase/server";
 
 type MenuActionResult = {
@@ -53,6 +59,9 @@ type BulkUpdateMenuItemsInput = {
   menuItemIds: string[];
   category?: string;
   price?: string;
+  status?: "draft" | "active" | "archived";
+  addToAllMenus?: boolean;
+  selectedMenuIds?: string[];
 };
 
 type BulkDeleteMenuItemsInput = {
@@ -76,17 +85,6 @@ type GenerateMenuItemImageResult = {
   mimeType?: string;
 };
 
-type BatchItemType = "food" | "drink" | "ingredient";
-
-type BatchMenuItemDraft = {
-  name: string;
-  description: string;
-  itemType: BatchItemType;
-  category: string;
-  price: string;
-  status: "draft" | "active";
-};
-
 type ParseBatchMenuItemsResult = {
   ok: boolean;
   error?: string;
@@ -101,8 +99,7 @@ type CreateMenuItemsBatchInput = {
 };
 
 function toNumber(value: string) {
-  const parsed = Number(value);
-  return Number.isFinite(parsed) ? parsed : null;
+  return normalizePriceInput(value);
 }
 
 function getFileExtension(fileName: string) {
@@ -115,150 +112,6 @@ function normalizeImageMimeType(mimeType: string) {
   const normalized = mimeType.toLowerCase().trim();
   if (normalized === "image/jpg") return "image/jpeg";
   return normalized;
-}
-
-function normalizePriceInput(value: string | number | null | undefined) {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value;
-  }
-
-  const raw = String(value ?? "").trim();
-  if (!raw) return null;
-
-  const cleaned = raw.replace(/\s+/g, "").replace(/[^0-9,.\-]/g, "");
-  if (!cleaned) return null;
-
-  let normalized = cleaned;
-  const hasDot = normalized.includes(".");
-  const hasComma = normalized.includes(",");
-
-  if (hasDot && hasComma) {
-    const lastDot = normalized.lastIndexOf(".");
-    const lastComma = normalized.lastIndexOf(",");
-    const decimalSep = lastDot > lastComma ? "." : ",";
-    const thousandsSep = decimalSep === "." ? "," : ".";
-    normalized = normalized.split(thousandsSep).join("");
-    normalized = normalized.replace(decimalSep, ".");
-  } else if (hasDot || hasComma) {
-    const sep = hasDot ? "." : ",";
-    const parts = normalized.split(sep);
-    if (parts.length > 2) {
-      const allThousands = parts.slice(1).every((part) => part.length === 3);
-      if (allThousands) {
-        normalized = parts.join("");
-      } else {
-        const last = parts.pop() ?? "";
-        normalized = `${parts.join("")}.${last}`;
-      }
-    } else if (parts.length === 2) {
-      const fractional = parts[1] ?? "";
-      if (fractional.length === 3) {
-        normalized = parts.join("");
-      } else if (fractional.length === 0) {
-        normalized = parts[0] ?? "";
-      } else {
-        normalized = `${parts[0] ?? ""}.${fractional}`;
-      }
-    }
-  }
-
-  const parsed = Number(normalized);
-  return Number.isFinite(parsed) ? parsed : null;
-}
-
-function normalizeDraftStatus(value: string | null | undefined): "draft" | "active" {
-  const normalized = String(value ?? "").trim().toLowerCase();
-  return normalized === "draft" || normalized === "borrador" ? "draft" : "active";
-}
-
-function inferItemTypeFromText(text: string): BatchItemType {
-  const normalized = text.toLowerCase();
-
-  if (
-    /\b(bebida|bebidas|drink|drinks|soda|cola|agua|water|juice|jugo|cerveza|beer|vino|wine|cocktail|cafe|coffee|tea|te)\b/.test(
-      normalized
-    )
-  ) {
-    return "drink";
-  }
-
-  if (
-    /\b(ingrediente|ingredientes|adicion|adiciones|addon|add-on|extra|extras|topping|salsa|queso|proteina|verdura|jamon|serrano|pesto)\b/.test(
-      normalized
-    )
-  ) {
-    return "ingredient";
-  }
-
-  return "food";
-}
-
-function normalizeItemType(value: string | null | undefined, category: string, name: string) {
-  const normalized = String(value ?? "").trim().toLowerCase();
-  if (
-    normalized === "drink" ||
-    normalized === "drinks" ||
-    normalized === "bebida" ||
-    normalized === "bebidas"
-  ) {
-    return "drink" satisfies BatchItemType;
-  }
-  if (
-    normalized === "ingredient" ||
-    normalized === "ingredients" ||
-    normalized === "ingrediente" ||
-    normalized === "ingredientes" ||
-    normalized === "addon" ||
-    normalized === "add-on" ||
-    normalized === "adicion" ||
-    normalized === "adiciones"
-  ) {
-    return "ingredient" satisfies BatchItemType;
-  }
-  if (normalized === "food" || normalized === "dish" || normalized === "plato") {
-    return "food" satisfies BatchItemType;
-  }
-
-  return inferItemTypeFromText(`${category} ${name}`);
-}
-
-function defaultCategoryForType(itemType: BatchItemType) {
-  if (itemType === "drink") return "Drinks";
-  if (itemType === "ingredient") return "Ingredients";
-  return "Food";
-}
-
-function normalizeBatchDraft(input: {
-  name?: string | null;
-  description?: string | null;
-  itemType?: string | null;
-  category?: string | null;
-  price?: string | number | null;
-  status?: string | null;
-}): BatchMenuItemDraft | null {
-  const name = String(input.name ?? "").trim();
-  if (name.length < 2) {
-    return null;
-  }
-
-  const itemType = normalizeItemType(input.itemType, String(input.category ?? ""), name);
-  const price = normalizePriceInput(input.price ?? "");
-  const safePrice = price === null ? 0 : price;
-  if (safePrice < 0) {
-    return null;
-  }
-
-  const rawCategory = String(input.category ?? "").trim();
-  const category = rawCategory.length > 0 ? rawCategory : defaultCategoryForType(itemType);
-
-  return {
-    name,
-    description: String(input.description ?? "").trim(),
-    itemType,
-    category,
-    price: safePrice.toFixed(2),
-    status: normalizeDraftStatus(input.status),
-  };
 }
 
 function parseCsvRows(csvText: string) {
@@ -715,71 +568,45 @@ export async function createMenuItemsBatchAction(
   }
 
   const { supabase, scope } = scopeResult;
-  const validItems: Array<{
-    organization_id: string;
-    name: string;
-    description: string | null;
-    category: string;
-    price: number;
-    status: "draft" | "active";
-  }> = [];
-  const seenNames = new Set<string>();
-  let invalidRows = 0;
-  let duplicateRows = 0;
+  const preparedRows = prepareBatchRowsForPersistence(input.items.slice(0, 300));
+  const validMenuItems = preparedRows.menuRows.map((row) => ({
+    organization_id: scope.organizationId,
+    name: row.name,
+    description: row.description,
+    category: row.category,
+    price: row.price,
+    status: row.status,
+  }));
+  const validIngredientRows = preparedRows.ingredientRows;
 
-  for (const row of input.items.slice(0, 300)) {
-    const normalized = normalizeBatchDraft(row);
-    if (!normalized) {
-      invalidRows += 1;
-      continue;
-    }
-
-    const dedupeKey = normalized.name.toLowerCase();
-    if (seenNames.has(dedupeKey)) {
-      duplicateRows += 1;
-      continue;
-    }
-    seenNames.add(dedupeKey);
-
-    const price = toNumber(normalized.price);
-    if (price === null || price < 0) {
-      invalidRows += 1;
-      continue;
-    }
-
-    validItems.push({
-      organization_id: scope.organizationId,
-      name: normalized.name,
-      description: normalized.description.length > 0 ? normalized.description : null,
-      category: normalized.category,
-      price,
-      status: normalized.status,
-    });
-  }
-
-  if (validItems.length === 0) {
+  if (validMenuItems.length === 0 && validIngredientRows.length === 0) {
     return { ok: false, error: "No valid rows to create. Check name and price values." };
   }
 
-  const { data: createdRows, error: insertError } = await supabase
-    .from("menu_items")
-    .upsert(validItems, {
-      onConflict: "organization_id,name",
-      ignoreDuplicates: true,
-    })
-    .select("id,name");
+  let createdIds: string[] = [];
+  let createdMenuItems: Array<{ id: string; name: string }> = [];
+  let skippedExistingMenus = 0;
 
-  if (insertError) {
-    return { ok: false, error: "Could not create batch menu items." };
+  if (validMenuItems.length > 0) {
+    const { data: createdRows, error: insertError } = await supabase
+      .from("menu_items")
+      .upsert(validMenuItems, {
+        onConflict: "organization_id,name",
+        ignoreDuplicates: true,
+      })
+      .select("id,name");
+
+    if (insertError) {
+      return { ok: false, error: "Could not create batch menu items." };
+    }
+
+    createdIds = (createdRows ?? []).map((row) => row.id);
+    createdMenuItems = (createdRows ?? []).map((row) => ({
+      id: row.id as string,
+      name: row.name as string,
+    }));
+    skippedExistingMenus = validMenuItems.length - createdIds.length;
   }
-
-  const createdIds = (createdRows ?? []).map((row) => row.id);
-  const createdMenuItems = (createdRows ?? []).map((row) => ({
-    id: row.id as string,
-    name: row.name as string,
-  }));
-  const skippedExisting = validItems.length - createdIds.length;
-  const totalSkipped = invalidRows + duplicateRows + skippedExisting;
 
   if (createdIds.length > 0 && (input.addToAllMenus || input.selectedMenuIds.length > 0)) {
     const eligibleResult = await resolveEligibleServiceMenuIds(
@@ -813,23 +640,142 @@ export async function createMenuItemsBatchAction(
     }
   }
 
+  let routedIngredients = 0;
+  if (validIngredientRows.length > 0) {
+    let defaultUnitId: string | null = null;
+    const { data: preferredUnit } = await supabase
+      .from("units")
+      .select("id")
+      .eq("organization_id", scope.organizationId)
+      .or("symbol.ilike.pc,name.ilike.piece")
+      .limit(1)
+      .maybeSingle();
+    if (preferredUnit?.id) {
+      defaultUnitId = preferredUnit.id;
+    } else {
+      const { data: fallbackUnit } = await supabase
+        .from("units")
+        .select("id")
+        .eq("organization_id", scope.organizationId)
+        .limit(1)
+        .maybeSingle();
+      defaultUnitId = fallbackUnit?.id ?? null;
+    }
+
+    const ingredientPayload = validIngredientRows.map((ingredient) => ({
+      organization_id: scope.organizationId,
+      name: ingredient.name,
+      base_unit_id: defaultUnitId,
+      sku: null as string | null,
+    }));
+
+    const { error: ingredientsUpsertError } = await supabase
+      .from("ingredients")
+      .upsert(ingredientPayload, {
+        onConflict: "organization_id,name",
+      });
+
+    if (ingredientsUpsertError) {
+      return {
+        ok: false,
+        error:
+          "Menu items created, but routing ingredient rows to Inventory failed.",
+      };
+    }
+
+    const ingredientNames = [...new Set(validIngredientRows.map((ingredient) => ingredient.name))];
+    const { data: ingredientRecords, error: ingredientLookupError } = await supabase
+      .from("ingredients")
+      .select("id,name")
+      .eq("organization_id", scope.organizationId)
+      .in("name", ingredientNames);
+
+    if (ingredientLookupError) {
+      return {
+        ok: false,
+        error:
+          "Ingredients were created, but inventory mapping failed.",
+      };
+    }
+
+    const ingredientIdByName = new Map(
+      (ingredientRecords ?? []).map((record) => [record.name, record.id])
+    );
+
+    const inventoryPayload = validIngredientRows
+      .map((ingredient) => {
+        const ingredientId = ingredientIdByName.get(ingredient.name);
+        if (!ingredientId) return null;
+        return {
+          organization_id: scope.organizationId,
+          restaurant_id: scope.restaurantId,
+          ingredient_id: ingredientId,
+          current_quantity: 0,
+          reorder_level: 0,
+          par_level: 0,
+          cost_per_unit: ingredient.costPerUnit,
+        };
+      })
+      .filter(
+        (entry): entry is {
+          organization_id: string;
+          restaurant_id: string;
+          ingredient_id: string;
+          current_quantity: number;
+          reorder_level: number;
+          par_level: number;
+          cost_per_unit: number;
+        } => entry !== null
+      );
+
+    if (inventoryPayload.length > 0) {
+      const { error: inventoryUpsertError } = await supabase
+        .from("inventory_items")
+        .upsert(inventoryPayload, {
+          onConflict: "restaurant_id,ingredient_id",
+        });
+
+      if (inventoryUpsertError) {
+        return {
+          ok: false,
+          error:
+            "Ingredients were created, but creating inventory items failed.",
+        };
+      }
+    }
+
+    routedIngredients = ingredientNames.length;
+  }
+
+  const totalSkipped =
+    preparedRows.invalidRows + preparedRows.duplicateRows + skippedExistingMenus;
+
   revalidatePath("/menu/items");
   revalidatePath("/menu");
   revalidatePath("/menu/menus");
+  revalidatePath("/inventory");
 
-  if (createdIds.length === 0) {
+  if (createdIds.length === 0 && routedIngredients === 0) {
     return {
       ok: false,
       error: "No new items were created. They may already exist.",
     };
   }
 
+  const messageParts: string[] = [];
+  if (createdIds.length > 0) {
+    messageParts.push(`${createdIds.length} dish(es) created`);
+  }
+  if (routedIngredients > 0) {
+    messageParts.push(`${routedIngredients} ingredient(s) routed to Inventory`);
+  }
+  if (totalSkipped > 0) {
+    messageParts.push(`${totalSkipped} row(s) skipped`);
+  }
+
   return {
     ok: true,
-    message:
-      totalSkipped > 0
-        ? `${createdIds.length} item(s) created. ${totalSkipped} row(s) skipped.`
-        : `${createdIds.length} item(s) created.`,
+    message: `${messageParts.join(". ")}.`,
     createdMenuItems,
   };
 }
@@ -1583,9 +1529,17 @@ export async function bulkUpdateMenuItemsAction(
   const rawPrice = (input.price ?? "").trim();
   const hasPrice = rawPrice.length > 0;
   const price = hasPrice ? toNumber(rawPrice) : null;
+  const status = input.status;
+  const hasStatus = status === "draft" || status === "active" || status === "archived";
+  const addToAllMenus = input.addToAllMenus === true;
+  const selectedMenuIds = [...new Set((input.selectedMenuIds ?? []).filter(Boolean))];
+  const hasMenuAssignment = addToAllMenus || selectedMenuIds.length > 0;
 
-  if (!hasCategory && !hasPrice) {
-    return { ok: false, error: "Provide a category or a price to update." };
+  if (!hasCategory && !hasPrice && !hasStatus && !hasMenuAssignment) {
+    return {
+      ok: false,
+      error: "Provide a category, price, status, or menu assignment.",
+    };
   }
   if (hasPrice && (price === null || price < 0)) {
     return { ok: false, error: "Price must be zero or greater." };
@@ -1615,6 +1569,7 @@ export async function bulkUpdateMenuItemsAction(
   const updatePayload: {
     category?: string;
     price?: number;
+    status?: "draft" | "active" | "archived";
   } = {};
   if (hasCategory) {
     updatePayload.category = category;
@@ -1622,19 +1577,57 @@ export async function bulkUpdateMenuItemsAction(
   if (hasPrice && price !== null) {
     updatePayload.price = price;
   }
+  if (hasStatus && status) {
+    updatePayload.status = status;
+  }
 
-  const { error: updateError } = await supabase
-    .from("menu_items")
-    .update(updatePayload)
-    .eq("organization_id", scope.organizationId)
-    .in("id", validIds);
+  if (Object.keys(updatePayload).length > 0) {
+    const { error: updateError } = await supabase
+      .from("menu_items")
+      .update(updatePayload)
+      .eq("organization_id", scope.organizationId)
+      .in("id", validIds);
 
-  if (updateError) {
-    return { ok: false, error: "Could not update selected dishes." };
+    if (updateError) {
+      return { ok: false, error: "Could not update selected dishes." };
+    }
+  }
+
+  if (hasMenuAssignment) {
+    const eligibleResult = await resolveEligibleServiceMenuIds(
+      scope,
+      supabase,
+      addToAllMenus,
+      selectedMenuIds
+    );
+    if (!eligibleResult.ok) {
+      return { ok: false, error: "Dishes updated, but menu assignment failed." };
+    }
+
+    if (eligibleResult.menuIds.length > 0) {
+      const assignmentPayload = eligibleResult.menuIds.flatMap((menuId) =>
+        validIds.map((menuItemId) => ({
+          organization_id: scope.organizationId,
+          service_menu_id: menuId,
+          menu_item_id: menuItemId,
+        }))
+      );
+
+      const { error: assignError } = await supabase
+        .from("service_menu_items")
+        .upsert(assignmentPayload, {
+          onConflict: "service_menu_id,menu_item_id",
+        });
+
+      if (assignError) {
+        return { ok: false, error: "Dishes updated, but menu assignment failed." };
+      }
+    }
   }
 
   revalidatePath("/menu/items");
   revalidatePath("/menu");
+  revalidatePath("/menu/menus");
 
   return {
     ok: true,

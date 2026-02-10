@@ -34,6 +34,7 @@ import {
   updateMenuItemAction,
   uploadMenuItemImagesAction,
 } from "@/app/(app)/menu/items/actions";
+import { buildBatchRowWarnings } from "@/lib/menu/batch-import";
 import { DataTable, type DataTableColumn } from "@/components/shared/data-table";
 import { DrawerForm } from "@/components/shared/drawer-form";
 import { Button } from "@/components/ui/button";
@@ -294,6 +295,11 @@ export function MenuCostingWorkspace({
   const [selectedRowIds, setSelectedRowIds] = useState<string[]>([]);
   const [bulkCategoryValue, setBulkCategoryValue] = useState("");
   const [bulkPriceValue, setBulkPriceValue] = useState("");
+  const [bulkStatusValue, setBulkStatusValue] = useState<
+    "unchanged" | "active" | "draft" | "archived"
+  >("unchanged");
+  const [bulkMenuScope, setBulkMenuScope] = useState<"none" | "all" | "selected">("none");
+  const [bulkSelectedMenuIds, setBulkSelectedMenuIds] = useState<string[]>([]);
 
   const [createForm, setCreateForm] = useState<CreateMenuItemForm>({
     name: "",
@@ -326,6 +332,7 @@ export function MenuCostingWorkspace({
   const [batchRows, setBatchRows] = useState<BatchMenuItemFormRow[]>([]);
   const [batchStep, setBatchStep] = useState<"upload" | "review">("upload");
   const [batchSummary, setBatchSummary] = useState<string | null>(null);
+  const [batchIssuesOnly, setBatchIssuesOnly] = useState(false);
   const [editImageFiles, setEditImageFiles] = useState<File[]>([]);
   const [editExistingPhotos, setEditExistingPhotos] = useState<MenuCostPhoto[]>([]);
   const [draggingExistingPhotoPath, setDraggingExistingPhotoPath] = useState<string | null>(null);
@@ -373,6 +380,16 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
     });
   }, [categoryFilter, nameFilter, rows]);
 
+  const existingDishNameSet = useMemo(
+    () =>
+      new Set(
+        rows
+          .map((row) => row.name.trim().toLowerCase())
+          .filter((name) => name.length > 0)
+      ),
+    [rows]
+  );
+
   const selectedRowIdSet = useMemo(() => new Set(selectedRowIds), [selectedRowIds]);
   const displayRows = useMemo<MenuCostDisplayRow[]>(
     () =>
@@ -386,6 +403,25 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
     filteredRows.length > 0 && filteredRows.every((row) => selectedRowIdSet.has(row.id));
   const someFilteredRowsSelected =
     filteredRows.some((row) => selectedRowIdSet.has(row.id)) && !allFilteredRowsSelected;
+
+  const batchRowWarningsById = useMemo(() => {
+    const warnings = buildBatchRowWarnings(batchRows, existingDishNameSet);
+    return new Map(batchRows.map((row, index) => [row.id, warnings[index] ?? []]));
+  }, [batchRows, existingDishNameSet]);
+
+  const batchIssueRowCount = useMemo(
+    () =>
+      batchRows.reduce((count, row) => {
+        const warnings = batchRowWarningsById.get(row.id) ?? [];
+        return warnings.length > 0 ? count + 1 : count;
+      }, 0),
+    [batchRows, batchRowWarningsById]
+  );
+
+  const reviewBatchRows = useMemo(() => {
+    if (!batchIssuesOnly) return batchRows;
+    return batchRows.filter((row) => (batchRowWarningsById.get(row.id) ?? []).length > 0);
+  }, [batchIssuesOnly, batchRows, batchRowWarningsById]);
 
   const assignmentSummary = useMemo(() => {
     if (serviceMenus.length === 0) return "No menus available yet";
@@ -451,6 +487,7 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
     setBatchRows([]);
     setBatchStep("upload");
     setBatchSummary(null);
+    setBatchIssuesOnly(false);
   }, []);
 
   const openBatchDialog = () => {
@@ -495,6 +532,7 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
       );
       setBatchSummary(result.summary ?? null);
       setBatchStep("review");
+      setBatchIssuesOnly(false);
       setMessage(result.summary ?? "Batch file parsed. Review before saving.");
     });
   };
@@ -574,6 +612,12 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
     if (batchRows.length === 0) {
       setError("Add at least one row before saving.");
       return;
+    }
+    if (batchIssueRowCount > 0) {
+      const accepted = globalThis.confirm(
+        `${batchIssueRowCount} row(s) are flagged with potential issues. Save anyway?`
+      );
+      if (!accepted) return;
     }
 
     clearFeedback();
@@ -737,17 +781,36 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
     setBatchActionsOpen(false);
     setBulkCategoryValue("");
     setBulkPriceValue("");
+    setBulkStatusValue("unchanged");
+    setBulkMenuScope("none");
+    setBulkSelectedMenuIds([]);
   };
 
   const applyBatchActionsChanges = () => {
     const normalizedCategory = bulkCategoryValue.trim();
     const normalizedPrice = bulkPriceValue.trim();
+    const status =
+      bulkStatusValue === "unchanged"
+        ? undefined
+        : (bulkStatusValue as "active" | "draft" | "archived");
+    const addToAllMenus = bulkMenuScope === "all";
+    const selectedMenuIds = bulkMenuScope === "selected" ? bulkSelectedMenuIds : [];
     if (selectedRowIds.length === 0) {
       setError("Select dishes first.");
       return;
     }
-    if (normalizedCategory.length === 0 && normalizedPrice.length === 0) {
-      setError("Enter a new category or a new price.");
+    if (
+      normalizedCategory.length === 0 &&
+      normalizedPrice.length === 0 &&
+      !status &&
+      !addToAllMenus &&
+      selectedMenuIds.length === 0
+    ) {
+      setError("Choose at least one action (category, price, status, or menu assignment).");
+      return;
+    }
+    if (bulkMenuScope === "selected" && selectedMenuIds.length === 0) {
+      setError("Choose at least one menu for selected assignment.");
       return;
     }
 
@@ -757,6 +820,9 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
         menuItemIds: selectedRowIds,
         category: normalizedCategory.length > 0 ? normalizedCategory : undefined,
         price: normalizedPrice.length > 0 ? normalizedPrice : undefined,
+        status,
+        addToAllMenus,
+        selectedMenuIds,
       });
       if (!result.ok) {
         setError(result.error ?? "Could not apply batch changes.");
@@ -1080,6 +1146,15 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
     });
   };
 
+  const toggleBulkMenuSelection = (menuId: string, checked: boolean) => {
+    setBulkSelectedMenuIds((current) => {
+      const selectedSet = new Set(current);
+      if (checked) selectedSet.add(menuId);
+      else selectedSet.delete(menuId);
+      return [...selectedSet];
+    });
+  };
+
   const canUsePortal = typeof document !== "undefined";
   const batchDialogWidthClass =
     batchStep === "review" && batchSourceType === "pdf"
@@ -1288,6 +1363,96 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
                       placeholder="0.00"
                     />
                   </div>
+                  <div className="space-y-2">
+                    <Label>Status (optional)</Label>
+                    <Select
+                      value={bulkStatusValue}
+                      onValueChange={(value) =>
+                        setBulkStatusValue(
+                          value as "unchanged" | "active" | "draft" | "archived"
+                        )
+                      }
+                    >
+                      <SelectTrigger>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="unchanged">Keep current status</SelectItem>
+                        <SelectItem value="active">Active</SelectItem>
+                        <SelectItem value="draft">Draft</SelectItem>
+                        <SelectItem value="archived">Archived</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>Menu Assignment (optional)</Label>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-3">
+                      <button
+                        type="button"
+                        className={`rounded-xl border p-3 text-left text-sm transition ${
+                          bulkMenuScope === "none"
+                            ? "border-cyan-800 bg-cyan-800 text-white"
+                            : "border-slate-200 bg-white text-slate-700"
+                        }`}
+                        onClick={() => {
+                          setBulkMenuScope("none");
+                          setBulkSelectedMenuIds([]);
+                        }}
+                      >
+                        Keep as-is
+                      </button>
+                      <button
+                        type="button"
+                        className={`rounded-xl border p-3 text-left text-sm transition ${
+                          bulkMenuScope === "all"
+                            ? "border-cyan-800 bg-cyan-800 text-white"
+                            : "border-slate-200 bg-white text-slate-700"
+                        }`}
+                        onClick={() => {
+                          setBulkMenuScope("all");
+                          setBulkSelectedMenuIds([]);
+                        }}
+                        disabled={serviceMenus.length === 0}
+                      >
+                        Assign to all menus
+                      </button>
+                      <button
+                        type="button"
+                        className={`rounded-xl border p-3 text-left text-sm transition ${
+                          bulkMenuScope === "selected"
+                            ? "border-cyan-800 bg-cyan-800 text-white"
+                            : "border-slate-200 bg-white text-slate-700"
+                        }`}
+                        onClick={() => setBulkMenuScope("selected")}
+                        disabled={serviceMenus.length === 0}
+                      >
+                        Assign selected menus
+                      </button>
+                    </div>
+                    {bulkMenuScope === "selected" ? (
+                      <div className="max-h-44 space-y-2 overflow-y-auto rounded-xl border border-slate-200 bg-white p-3">
+                        {serviceMenus.map((menu) => {
+                          const checked = bulkSelectedMenuIds.includes(menu.id);
+                          return (
+                            <label key={menu.id} className="flex cursor-pointer items-center gap-3 rounded-lg px-2 py-2 hover:bg-slate-50">
+                              <input
+                                type="checkbox"
+                                className="size-4 rounded border-slate-300"
+                                checked={checked}
+                                onChange={(event) =>
+                                  toggleBulkMenuSelection(menu.id, event.target.checked)
+                                }
+                              />
+                              <span className="text-sm text-slate-700">{menu.name}</span>
+                            </label>
+                          );
+                        })}
+                      </div>
+                    ) : null}
+                    {serviceMenus.length === 0 ? (
+                      <p className="text-xs text-slate-500">No menus available to assign right now.</p>
+                    ) : null}
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center justify-between gap-2 border-t px-6 py-4">
@@ -1310,7 +1475,9 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
                         isBulkPending ||
                         selectedRowIds.length === 0 ||
                         (bulkCategoryValue.trim().length === 0 &&
-                          bulkPriceValue.trim().length === 0)
+                          bulkPriceValue.trim().length === 0 &&
+                          bulkStatusValue === "unchanged" &&
+                          bulkMenuScope === "none")
                       }
                     >
                       {isBulkPending ? "Applying..." : "Apply Changes"}
@@ -1510,12 +1677,29 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
                   ) : (
                     <>
                       <div className="rounded-xl border border-slate-200 bg-slate-50/80 p-3">
-                        <p className="text-xs uppercase tracking-[0.12em] text-slate-500">
-                          Import Summary
-                        </p>
-                        <p className="mt-1 text-sm text-slate-700">
-                          {batchSummary ?? `Parsed ${batchRows.length} rows.`}
-                        </p>
+                        <div className="flex flex-wrap items-start justify-between gap-2">
+                          <div>
+                            <p className="text-xs uppercase tracking-[0.12em] text-slate-500">
+                              Import Summary
+                            </p>
+                            <p className="mt-1 text-sm text-slate-700">
+                              {batchSummary ?? `Parsed ${batchRows.length} rows.`}
+                            </p>
+                            <p className={`mt-1 text-xs ${batchIssueRowCount > 0 ? "text-amber-700" : "text-emerald-700"}`}>
+                              {batchIssueRowCount > 0
+                                ? `${batchIssueRowCount} row(s) flagged for review before save.`
+                                : "No QA issues detected."}
+                            </p>
+                          </div>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() => setBatchIssuesOnly((current) => !current)}
+                          >
+                            {batchIssuesOnly ? "Show All Rows" : "Show Issues Only"}
+                          </Button>
+                        </div>
                       </div>
 
                       <div className="rounded-xl border border-slate-200 bg-slate-50/70 p-4">
@@ -1542,7 +1726,7 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
 
                       <div className="overflow-hidden rounded-xl border border-slate-200">
                         <div className="max-h-[44vh] overflow-auto">
-                          <table className="w-full min-w-[1040px] text-left text-sm">
+                          <table className="w-full min-w-[1160px] text-left text-sm">
                             <thead className="sticky top-0 bg-slate-100 text-xs uppercase tracking-[0.1em] text-slate-600">
                               <tr>
                                 <th className="px-3 py-2">Photo</th>
@@ -1552,12 +1736,15 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
                                 <th className="px-3 py-2">Category</th>
                                 <th className="px-3 py-2">Price</th>
                                 <th className="px-3 py-2">Status</th>
+                                <th className="px-3 py-2">QA</th>
                                 <th className="px-3 py-2 text-right">Actions</th>
                               </tr>
                             </thead>
                             <tbody>
-                              {batchRows.map((row) => (
-                                <tr key={row.id} className="border-t align-top">
+                              {reviewBatchRows.length > 0 ? reviewBatchRows.map((row) => {
+                                const warnings = batchRowWarningsById.get(row.id) ?? [];
+                                return (
+                                <tr key={row.id} className={`border-t align-top ${warnings.length > 0 ? "bg-amber-50/30" : ""}`}>
                                   <td className="px-3 py-2">
                                     <div className="flex items-center gap-2">
                                       <label
@@ -1684,6 +1871,19 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
                                       <option value="draft">Draft</option>
                                     </select>
                                   </td>
+                                  <td className="px-3 py-2">
+                                    {warnings.length > 0 ? (
+                                      <div className="space-y-1">
+                                        {warnings.map((warning) => (
+                                          <p key={warning} className="text-xs text-amber-800">
+                                            {warning}
+                                          </p>
+                                        ))}
+                                      </div>
+                                    ) : (
+                                      <span className="text-xs text-emerald-700">OK</span>
+                                    )}
+                                  </td>
                                   <td className="px-3 py-2 text-right">
                                     <Button
                                       type="button"
@@ -1696,7 +1896,16 @@ Salsa de la casa,ingredient,Salsa extra para acompanamiento,Ingredients,2.00,act
                                     </Button>
                                   </td>
                                 </tr>
-                              ))}
+                                );
+                              }) : (
+                                <tr>
+                                  <td colSpan={9} className="px-3 py-6 text-center text-sm text-slate-500">
+                                    {batchIssuesOnly
+                                      ? "No flagged rows. Disable 'Show Issues Only' to see all rows."
+                                      : "No rows to review."}
+                                  </td>
+                                </tr>
+                              )}
                             </tbody>
                           </table>
                         </div>
